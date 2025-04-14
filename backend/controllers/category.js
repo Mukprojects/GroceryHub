@@ -1,4 +1,4 @@
-const Category = require('../models/Category');
+const { Category, Product } = require('../backend/models');
 const slugify = require('../utils/slugify');
 const fs = require('fs');
 const path = require('path');
@@ -13,7 +13,10 @@ exports.createCategory = async (req, res) => {
     const { name, description } = req.body;
     
     // Check if category exists
-    const existingCategory = await Category.findOne({ name });
+    const existingCategory = await Category.findOne({ 
+      where: { name } 
+    });
+    
     if (existingCategory) {
       return res.status(400).json({ message: 'Category already exists' });
     }
@@ -21,16 +24,14 @@ exports.createCategory = async (req, res) => {
     // Generate slug from name
     const slug = slugify(name);
     
-    // Create category object
-    const category = new Category({
+    // Create category object with Sequelize
+    const category = await Category.create({
       name,
       description,
       slug,
-      ...(req.file && { image: `/uploads/${req.file.filename}` }),
+      image: req.file ? `/uploads/categories/${req.file.filename}` : null,
     });
 
-    // Save category
-    await category.save();
     res.status(201).json(category);
   } catch (error) {
     console.error('Create category error:', error);
@@ -45,7 +46,9 @@ exports.createCategory = async (req, res) => {
  */
 exports.getAllCategories = async (req, res) => {
   try {
-    const categories = await Category.find().sort({ name: 1 });
+    const categories = await Category.findAll({
+      order: [['name', 'ASC']]
+    });
     res.json(categories);
   } catch (error) {
     console.error('Get all categories error:', error);
@@ -60,7 +63,7 @@ exports.getAllCategories = async (req, res) => {
  */
 exports.getCategoryById = async (req, res) => {
   try {
-    const category = await Category.findById(req.params.id);
+    const category = await Category.findByPk(req.params.id);
     
     if (!category) {
       return res.status(404).json({ message: 'Category not found' });
@@ -69,12 +72,7 @@ exports.getCategoryById = async (req, res) => {
     res.json(category);
   } catch (error) {
     console.error('Get category by ID error:', error);
-    
-    if (error.kind === 'ObjectId') {
-      return res.status(404).json({ message: 'Category not found' });
-    }
-    
-    res.status(500).json({ message: 'Server error' });
+    res.status(404).json({ message: 'Category not found' });
   }
 };
 
@@ -85,7 +83,9 @@ exports.getCategoryById = async (req, res) => {
  */
 exports.getCategoryBySlug = async (req, res) => {
   try {
-    const category = await Category.findOne({ slug: req.params.slug });
+    const category = await Category.findOne({ 
+      where: { slug: req.params.slug }
+    });
     
     if (!category) {
       return res.status(404).json({ message: 'Category not found' });
@@ -106,7 +106,7 @@ exports.getCategoryBySlug = async (req, res) => {
 exports.updateCategory = async (req, res) => {
   try {
     const { name, description } = req.body;
-    const category = await Category.findById(req.params.id);
+    const category = await Category.findByPk(req.params.id);
 
     if (!category) {
       return res.status(404).json({ message: 'Category not found' });
@@ -128,7 +128,7 @@ exports.updateCategory = async (req, res) => {
           fs.unlinkSync(oldImagePath);
         }
       }
-      category.image = `/uploads/${req.file.filename}`;
+      category.image = `/uploads/categories/${req.file.filename}`;
     }
 
     await category.save();
@@ -146,10 +146,21 @@ exports.updateCategory = async (req, res) => {
  */
 exports.deleteCategory = async (req, res) => {
   try {
-    const category = await Category.findById(req.params.id);
+    const category = await Category.findByPk(req.params.id);
 
     if (!category) {
       return res.status(404).json({ message: 'Category not found' });
+    }
+
+    // Check if category has products
+    const products = await Product.count({
+      where: { categoryId: category.id }
+    });
+
+    if (products > 0) {
+      return res.status(400).json({ 
+        message: `Cannot delete category with ${products} products. Remove products first.` 
+      });
     }
 
     // Delete the image file if it exists
@@ -160,7 +171,7 @@ exports.deleteCategory = async (req, res) => {
       }
     }
 
-    await category.deleteOne();
+    await category.destroy();
     res.json({ message: 'Category removed' });
   } catch (error) {
     console.error('Delete category error:', error);

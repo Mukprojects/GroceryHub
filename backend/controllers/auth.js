@@ -1,4 +1,4 @@
-const User = require('../models/User');
+const { User } = require('../backend/models');
 const jwt = require('jsonwebtoken');
 
 /**
@@ -8,37 +8,35 @@ const jwt = require('jsonwebtoken');
  */
 exports.register = async (req, res) => {
   try {
-    const { name, email, password, phone } = req.body;
+    const { name, email, password, phone, address } = req.body;
 
     // Check if user exists
-    let user = await User.findOne({ email });
-    if (user) {
+    const existingUser = await User.findOne({ where: { email } });
+    if (existingUser) {
       return res.status(400).json({ message: 'User already exists' });
     }
 
-    // Create new user
-    user = new User({
+    // Create new user with Sequelize
+    const user = await User.create({
       name,
       email,
-      password,
+      password, // Password will be hashed by Sequelize hooks
       phone,
+      address
     });
 
-    // Save user to database
-    await user.save();
-
     // Create JWT token
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, {
       expiresIn: '7d',
     });
 
     res.status(201).json({
       token,
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role,
+        isAdmin: user.isAdmin
       },
     });
   } catch (error) {
@@ -56,30 +54,30 @@ exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Find user by email
-    const user = await User.findOne({ email });
+    // Find user by email using Sequelize
+    const user = await User.findOne({ where: { email } });
     if (!user) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
-    // Verify password
-    const isMatch = await user.comparePassword(password);
+    // Verify password using Sequelize model method
+    const isMatch = await user.matchPassword(password);
     if (!isMatch) {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
     // Create JWT token
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, {
       expiresIn: '7d',
     });
 
     res.json({
       token,
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role,
+        isAdmin: user.isAdmin
       },
     });
   } catch (error) {
@@ -95,8 +93,8 @@ exports.login = async (req, res) => {
  */
 exports.getUser = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).select('-password');
-    res.json(user);
+    // User is already attached to request by the auth middleware
+    res.json(req.user);
   } catch (error) {
     console.error('Get user error:', error);
     res.status(500).json({ message: 'Server error' });

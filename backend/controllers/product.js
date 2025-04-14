@@ -1,8 +1,8 @@
-const Product = require('../models/Product');
-const Category = require('../models/Category');
+const { Product, Category } = require('../backend/models');
 const slugify = require('../utils/slugify');
 const fs = require('fs');
 const path = require('path');
+const { Op } = require('sequelize');
 
 /**
  * Create a new product
@@ -16,14 +16,15 @@ exports.createProduct = async (req, res) => {
       description,
       price,
       discountPrice,
-      category,
-      stock,
-      unit,
+      categoryId,
+      countInStock,
       featured,
+      weight,
+      dimensions
     } = req.body;
 
     // Check if category exists
-    const categoryExists = await Category.findById(category);
+    const categoryExists = await Category.findByPk(categoryId);
     if (!categoryExists) {
       return res.status(404).json({ message: 'Category not found' });
     }
@@ -31,23 +32,28 @@ exports.createProduct = async (req, res) => {
     // Generate slug from name
     const slug = slugify(name);
 
-    // Create product object
-    const product = new Product({
+    // Create product object with Sequelize
+    const product = await Product.create({
       name,
       description,
       price,
-      category,
-      stock,
-      unit,
+      discountPrice: discountPrice || 0,
       slug,
-      ...(discountPrice && { discountPrice }),
-      ...(featured !== undefined && { featured }),
-      images: req.files ? req.files.map(file => `/uploads/${file.filename}`) : [],
+      countInStock: countInStock || 0,
+      categoryId,
+      image: req.files && req.files.length > 0 ? `/uploads/products/${req.files[0].filename}` : null,
+      images: req.files ? req.files.map(file => `/uploads/products/${file.filename}`) : [],
+      featured: featured === 'true' || featured === true,
+      weight,
+      dimensions
     });
 
-    // Save product
-    await product.save();
-    res.status(201).json(product);
+    // Get the product with its category
+    const productWithCategory = await Product.findByPk(product.id, {
+      include: [{ model: Category, as: 'category' }]
+    });
+
+    res.status(201).json(productWithCategory);
   } catch (error) {
     console.error('Create product error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -63,70 +69,72 @@ exports.getProducts = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
+    const offset = (page - 1) * limit;
     
-    // Build query
-    const queryObj = { ...req.query };
+    // Build query options
+    const queryOptions = {
+      include: [{ model: Category, as: 'category' }],
+      offset,
+      limit,
+      distinct: true
+    };
     
-    // Fields to exclude from filtering
-    const excludedFields = ['page', 'sort', 'limit', 'fields'];
-    excludedFields.forEach(field => delete queryObj[field]);
+    // Build where clause for filtering
+    const whereClause = {};
     
-    // Filter by category (either id or slug)
+    // Filter by category
     if (req.query.category) {
       const category = await Category.findOne({
-        $or: [
-          { _id: req.query.category },
-          { slug: req.query.category }
-        ]
+        where: {
+          [Op.or]: [
+            { id: req.query.category },
+            { slug: req.query.category }
+          ]
+        }
       });
       
       if (category) {
-        queryObj.category = category._id;
+        whereClause.categoryId = category.id;
       }
     }
     
     // Filter by price range
     if (req.query.minPrice || req.query.maxPrice) {
-      queryObj.price = {};
-      if (req.query.minPrice) queryObj.price.$gte = parseInt(req.query.minPrice);
-      if (req.query.maxPrice) queryObj.price.$lte = parseInt(req.query.maxPrice);
+      whereClause.price = {};
+      if (req.query.minPrice) whereClause.price[Op.gte] = parseFloat(req.query.minPrice);
+      if (req.query.maxPrice) whereClause.price[Op.lte] = parseFloat(req.query.maxPrice);
     }
     
     // Search by name
     if (req.query.search) {
-      queryObj.name = { $regex: req.query.search, $options: 'i' };
+      whereClause.name = { [Op.like]: `%${req.query.search}%` };
     }
     
-    // Advanced filtering
-    let queryStr = JSON.stringify(queryObj);
-    queryStr = queryStr.replace(/\b(gte|gt|lte|lt)\b/g, match => `$${match}`);
+    // Featured products
+    if (req.query.featured === 'true') {
+      whereClause.featured = true;
+    }
     
-    // Build query
-    let query = Product.find(JSON.parse(queryStr))
-      .populate('category', 'name slug')
-      .skip(skip)
-      .limit(limit);
+    // Add where clause to query options
+    if (Object.keys(whereClause).length > 0) {
+      queryOptions.where = whereClause;
+    }
     
     // Sorting
     if (req.query.sort) {
-      const sortBy = req.query.sort.split(',').join(' ');
-      query = query.sort(sortBy);
+      const sortArray = req.query.sort.split(',').map(field => {
+        if (field.startsWith('-')) {
+          return [field.substring(1), 'DESC'];
+        }
+        return [field, 'ASC'];
+      });
+      queryOptions.order = sortArray;
     } else {
-      query = query.sort('-createdAt');
-    }
-    
-    // Field limiting
-    if (req.query.fields) {
-      const fields = req.query.fields.split(',').join(' ');
-      query = query.select(fields);
+      queryOptions.order = [['createdAt', 'DESC']];
     }
     
     // Execute query
-    const products = await query;
-    
-    // Get total count for pagination
-    const total = await Product.countDocuments(JSON.parse(queryStr));
+    const { rows: products, count: total } = await Product.findAndCountAll(queryOptions);
     
     res.json({
       products,
@@ -141,14 +149,38 @@ exports.getProducts = async (req, res) => {
 };
 
 /**
+ * Get featured products
+ * @route GET /api/products/featured
+ * @access Public
+ */
+exports.getFeaturedProducts = async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 8;
+    
+    const products = await Product.findAll({
+      where: { featured: true },
+      include: [{ model: Category, as: 'category' }],
+      limit,
+      order: [['createdAt', 'DESC']]
+    });
+    
+    res.json(products);
+  } catch (error) {
+    console.error('Get featured products error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
  * Get product by ID
  * @route GET /api/products/:id
  * @access Public
  */
 exports.getProductById = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id)
-      .populate('category', 'name slug');
+    const product = await Product.findByPk(req.params.id, {
+      include: [{ model: Category, as: 'category' }]
+    });
     
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
@@ -157,12 +189,7 @@ exports.getProductById = async (req, res) => {
     res.json(product);
   } catch (error) {
     console.error('Get product by ID error:', error);
-    
-    if (error.kind === 'ObjectId') {
-      return res.status(404).json({ message: 'Product not found' });
-    }
-    
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Product not found' });
   }
 };
 
@@ -173,8 +200,10 @@ exports.getProductById = async (req, res) => {
  */
 exports.getProductBySlug = async (req, res) => {
   try {
-    const product = await Product.findOne({ slug: req.params.slug })
-      .populate('category', 'name slug');
+    const product = await Product.findOne({
+      where: { slug: req.params.slug },
+      include: [{ model: Category, as: 'category' }]
+    });
     
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
@@ -194,62 +223,78 @@ exports.getProductBySlug = async (req, res) => {
  */
 exports.updateProduct = async (req, res) => {
   try {
+    const product = await Product.findByPk(req.params.id);
+    
+    if (!product) {
+      return res.status(404).json({ message: 'Product not found' });
+    }
+    
     const {
       name,
       description,
       price,
       discountPrice,
-      category,
-      stock,
-      unit,
+      categoryId,
+      countInStock,
       featured,
+      weight,
+      dimensions
     } = req.body;
     
-    const product = await Product.findById(req.params.id);
-
-    if (!product) {
-      return res.status(404).json({ message: 'Product not found' });
-    }
-
-    // Check if category exists if changing categories
-    if (category && category !== product.category.toString()) {
-      const categoryExists = await Category.findById(category);
-      if (!categoryExists) {
-        return res.status(404).json({ message: 'Category not found' });
-      }
-    }
-
-    // Update fields
-    if (name) {
-      product.name = name;
+    // If name is changed, update slug
+    if (name && name !== product.name) {
       product.slug = slugify(name);
     }
+    
+    // Update fields
+    if (name) product.name = name;
     if (description) product.description = description;
     if (price) product.price = price;
     if (discountPrice !== undefined) product.discountPrice = discountPrice;
-    if (category) product.category = category;
-    if (stock !== undefined) product.stock = stock;
-    if (unit) product.unit = unit;
-    if (featured !== undefined) product.featured = featured;
+    if (categoryId) product.categoryId = categoryId;
+    if (countInStock !== undefined) product.countInStock = countInStock;
+    if (featured !== undefined) product.featured = featured === 'true' || featured === true;
+    if (weight) product.weight = weight;
+    if (dimensions) product.dimensions = dimensions;
     
-    // Handle image updates
+    // Handle images
     if (req.files && req.files.length > 0) {
-      // Delete old images if they exist
-      if (product.images && product.images.length > 0) {
-        product.images.forEach(image => {
-          const imagePath = path.join(__dirname, '..', image);
-          if (fs.existsSync(imagePath)) {
-            fs.unlinkSync(imagePath);
-          }
-        });
-      }
+      const newImages = req.files.map(file => `/uploads/products/${file.filename}`);
       
-      // Add new images
-      product.images = req.files.map(file => `/uploads/${file.filename}`);
+      // If deleteImages is true, replace all images
+      if (req.body.deleteImages === 'true') {
+        // Delete old image files (implementation depends on your file storage)
+        if (product.images && Array.isArray(product.images)) {
+          product.images.forEach(image => {
+            const imagePath = path.join(__dirname, '..', image);
+            if (fs.existsSync(imagePath)) {
+              fs.unlinkSync(imagePath);
+            }
+          });
+        }
+        
+        product.images = newImages;
+        if (newImages.length > 0) {
+          product.image = newImages[0];
+        }
+      } else {
+        // Append new images
+        product.images = [...(product.images || []), ...newImages];
+        if (!product.image && newImages.length > 0) {
+          product.image = newImages[0];
+        }
+      }
     }
-
+    
+    // Save updated product
     await product.save();
-    res.json(product);
+    
+    // Get the updated product with its category
+    const updatedProduct = await Product.findByPk(product.id, {
+      include: [{ model: Category, as: 'category' }]
+    });
+    
+    res.json(updatedProduct);
   } catch (error) {
     console.error('Update product error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -263,14 +308,14 @@ exports.updateProduct = async (req, res) => {
  */
 exports.deleteProduct = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
-
+    const product = await Product.findByPk(req.params.id);
+    
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
     }
-
-    // Delete product images if they exist
-    if (product.images && product.images.length > 0) {
+    
+    // Delete product images (implementation depends on your file storage)
+    if (product.images && Array.isArray(product.images)) {
       product.images.forEach(image => {
         const imagePath = path.join(__dirname, '..', image);
         if (fs.existsSync(imagePath)) {
@@ -278,32 +323,13 @@ exports.deleteProduct = async (req, res) => {
         }
       });
     }
-
-    await product.deleteOne();
+    
+    // Delete product
+    await product.destroy();
+    
     res.json({ message: 'Product removed' });
   } catch (error) {
     console.error('Delete product error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-};
-
-/**
- * Get featured products
- * @route GET /api/products/featured
- * @access Public
- */
-exports.getFeaturedProducts = async (req, res) => {
-  try {
-    const limit = parseInt(req.query.limit) || 8;
-    
-    const products = await Product.find({ featured: true })
-      .populate('category', 'name slug')
-      .limit(limit)
-      .sort('-createdAt');
-    
-    res.json(products);
-  } catch (error) {
-    console.error('Get featured products error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -315,39 +341,50 @@ exports.getFeaturedProducts = async (req, res) => {
  */
 exports.addProductReview = async (req, res) => {
   try {
-    const { rating, review } = req.body;
+    const { rating, comment } = req.body;
+    const userId = req.user.id;
     
-    if (!rating) {
-      return res.status(400).json({ message: 'Rating is required' });
-    }
-    
-    const product = await Product.findById(req.params.id);
+    const product = await Product.findByPk(req.params.id);
     
     if (!product) {
       return res.status(404).json({ message: 'Product not found' });
     }
     
-    // Check if user already reviewed this product
-    const alreadyReviewed = product.ratings.find(
-      r => r.userId.toString() === req.user._id.toString()
-    );
+    // Create review using Review model
+    const { Review } = require('../backend/models');
     
-    if (alreadyReviewed) {
+    // Check if user already reviewed this product
+    const existingReview = await Review.findOne({
+      where: {
+        productId: req.params.id,
+        userId
+      }
+    });
+    
+    if (existingReview) {
       return res.status(400).json({ message: 'Product already reviewed' });
     }
     
-    // Add new review
-    const newReview = {
-      userId: req.user._id,
+    const review = await Review.create({
       rating: Number(rating),
-      review,
-      date: Date.now(),
-    };
+      comment,
+      userId,
+      productId: product.id
+    });
     
-    product.ratings.push(newReview);
+    // Update product average rating
+    const reviews = await Review.findAll({
+      where: { productId: product.id }
+    });
+    
+    const avgRating = reviews.reduce((acc, item) => item.rating + acc, 0) / reviews.length;
+    
+    product.averageRating = avgRating;
+    product.numReviews = reviews.length;
     
     await product.save();
-    res.status(201).json({ message: 'Review added' });
+    
+    res.status(201).json({ message: 'Review added', review });
   } catch (error) {
     console.error('Add review error:', error);
     res.status(500).json({ message: 'Server error' });

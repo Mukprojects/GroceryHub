@@ -1,4 +1,4 @@
-const User = require('../models/User');
+const { User } = require('../backend/models');
 
 /**
  * Update user profile
@@ -8,7 +8,7 @@ const User = require('../models/User');
 exports.updateProfile = async (req, res) => {
   try {
     const { name, email, phone, address } = req.body;
-    const user = await User.findById(req.user.id);
+    const user = await User.findByPk(req.user.id);
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -23,7 +23,9 @@ exports.updateProfile = async (req, res) => {
     await user.save();
 
     // Return updated user without password
-    const updatedUser = await User.findById(user._id).select('-password');
+    const updatedUser = await User.findByPk(user.id, {
+      attributes: { exclude: ['password'] }
+    });
     res.json(updatedUser);
   } catch (error) {
     console.error('Update profile error:', error);
@@ -48,7 +50,7 @@ exports.changePassword = async (req, res) => {
     }
 
     // Find the user
-    const user = await User.findById(req.user.id);
+    const user = await User.findByPk(req.user.id);
 
     // Verify current password
     const isMatch = await user.comparePassword(currentPassword);
@@ -74,7 +76,9 @@ exports.changePassword = async (req, res) => {
  */
 exports.getAllUsers = async (req, res) => {
   try {
-    const users = await User.find().select('-password');
+    const users = await User.findAll({
+      attributes: { exclude: ['password'] }
+    });
     res.json(users);
   } catch (error) {
     console.error('Get all users error:', error);
@@ -89,7 +93,9 @@ exports.getAllUsers = async (req, res) => {
  */
 exports.getUserById = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('-password');
+    const user = await User.findByPk(req.params.id, {
+      attributes: { exclude: ['password'] }
+    });
     
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -98,12 +104,7 @@ exports.getUserById = async (req, res) => {
     res.json(user);
   } catch (error) {
     console.error('Get user by ID error:', error);
-    
-    if (error.kind === 'ObjectId') {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
-    res.status(500).json({ message: 'Server error' });
+    res.status(404).json({ message: 'User not found' });
   }
 };
 
@@ -115,7 +116,7 @@ exports.getUserById = async (req, res) => {
 exports.updateUser = async (req, res) => {
   try {
     const { name, email, role } = req.body;
-    const user = await User.findById(req.params.id);
+    const user = await User.findByPk(req.params.id);
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -128,14 +129,11 @@ exports.updateUser = async (req, res) => {
 
     await user.save();
 
-    res.json(await User.findById(user._id).select('-password'));
+    res.json(await User.findByPk(user.id, {
+      attributes: { exclude: ['password'] }
+    }));
   } catch (error) {
     console.error('Update user error:', error);
-    
-    if (error.kind === 'ObjectId') {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
     res.status(500).json({ message: 'Server error' });
   }
 };
@@ -147,21 +145,16 @@ exports.updateUser = async (req, res) => {
  */
 exports.deleteUser = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
+    const user = await User.findByPk(req.params.id);
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    await user.deleteOne();
+    await user.destroy();
     res.json({ message: 'User removed' });
   } catch (error) {
     console.error('Delete user error:', error);
-    
-    if (error.kind === 'ObjectId') {
-      return res.status(404).json({ message: 'User not found' });
-    }
-    
     res.status(500).json({ message: 'Server error' });
   }
 }; 

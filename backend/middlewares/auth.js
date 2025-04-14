@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const { User } = require('../backend/models');
 
 // Middleware to authenticate user
 exports.authMiddleware = async (req, res, next) => {
@@ -14,8 +14,10 @@ exports.authMiddleware = async (req, res, next) => {
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
-    // Find user by id
-    const user = await User.findById(decoded.id).select('-password');
+    // Find user by id using Sequelize
+    const user = await User.findByPk(decoded.id, {
+      attributes: { exclude: ['password'] }
+    });
     
     if (!user) {
       return res.status(401).json({ message: 'Token is not valid' });
@@ -32,7 +34,7 @@ exports.authMiddleware = async (req, res, next) => {
 // Middleware to check if user is admin
 exports.adminMiddleware = async (req, res, next) => {
   try {
-    if (req.user && req.user.role === 'admin') {
+    if (req.user && req.user.isAdmin) {
       next();
     } else {
       return res.status(403).json({ message: 'Access denied, admin privileges required' });
